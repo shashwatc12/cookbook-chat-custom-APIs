@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "axios": "^1.8.4",
     "mongodb-rag-ingest": "^0.1.8"
   },
   "devDependencies": {

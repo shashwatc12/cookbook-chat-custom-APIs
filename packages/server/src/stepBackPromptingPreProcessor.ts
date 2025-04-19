@@ -2,17 +2,7 @@ import { QueryPreprocessorFunc } from "mongodb-chatbot-server";
 import { StringOutputParser } from "@langchain/core/output_parsers";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { LLM } from "@langchain/core/language_models/llms";
-import { ChatOpenAI } from "@langchain/openai";
-
-export const makeLangchainOpenAiLlm = (
-  modelName: string,
-  openAIApiKey: string
-) =>
-  new ChatOpenAI({
-    modelName,
-    openAIApiKey,
-    temperature: 0, // generally best practice to have temperature at 0 for RAG
-  });
+// OpenAI imports and functions removed
 
 /**
   Generate a step-back search query for a given user query

@@ -5,6 +5,9 @@ import Chatbot, {
   ModalView,
 } from "mongodb-chatbot-ui";
 
+// Use environment variable for API URL
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
 function MyApp() {
   const suggestedPrompts = [
     "What can you do?",
@@ -24,7 +27,7 @@ function MyApp() {
         </p>
       </header>
       <Chatbot
-        serverBaseUrl={import.meta.env.VITE_SERVER_BASE_URL}
+        serverBaseUrl={API_URL}
         isExperimental={false}
       >
         <>

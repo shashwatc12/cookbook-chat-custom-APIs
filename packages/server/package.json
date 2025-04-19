@@ -18,11 +18,13 @@
   },
   "dependencies": {
     "@azure/openai": "^1.0.0-beta.6",
+    "@google/generative-ai": "^0.2.1",
     "@langchain/core": "^0.1.46",
     "@langchain/openai": "^0.0.20",
     "@types/node": "^16.0.0",
+    "axios": "^1.8.4",
     "express": "^4.18.2",
-    "zod": "^3.22.4",
-    "mongodb-chatbot-server": "^0.9.1"
+    "mongodb-chatbot-server": "^0.9.1",
+    "zod": "^3.22.4"
   }
 }
