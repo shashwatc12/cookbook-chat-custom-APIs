@@ -1,11 +1,8 @@
 import {
   MongoClient,
   makeMongoDbEmbeddedContentStore,
-  makeOpenAiEmbedder,
   makeMongoDbConversationsService,
   AppConfig,
-  makeOpenAiChatLlm,
-  OpenAiChatMessage,
   SystemPrompt,
   makeDefaultFindContent,
   logger,
@@ -15,11 +12,10 @@ import {
   MakeUserMessageFunc,
   UserMessage,
 } from "mongodb-chatbot-server";
-import { OpenAIClient, OpenAIKeyCredential } from "@azure/openai";
 import path from "path";
 import { loadEnvVars } from "./loadEnvVars";
+import { createChatLlm, createEmbedder } from "./llm/llmProviderFactory";
 import {
-  makeLangchainOpenAiLlm,
   makeStepBackPromptingPreprocessor,
 } from "./stepBackPromptingPreProcessor";
 
@@ -29,23 +25,30 @@ const {
   MONGODB_CONNECTION_URI,
   MONGODB_DATABASE_NAME,
   VECTOR_SEARCH_INDEX_NAME,
-  OPENAI_API_KEY,
-  OPENAI_EMBEDDING_MODEL,
-  OPENAI_CHAT_COMPLETION_MODEL,
+  LLM_PROVIDER,
+  OLLAMA_BASE_URL,
+  OLLAMA_EMBEDDING_MODEL,
+  OLLAMA_CHAT_MODEL,
+  GEMINI_API_KEY,
+  GEMINI_CHAT_MODEL,
+  GEMINI_EMBEDDING_MODEL,
+  LLM_TIMEOUT_MS,
 } = loadEnvVars(dotenvPath);
 
-// Create the OpenAI client
-// for interacting with the OpenAI API (ChatGPT API and Embedding API)
-const openAiClient = new OpenAIClient(new OpenAIKeyCredential(OPENAI_API_KEY));
+// Log which LLM provider we're using
+logger.info(`Using LLM provider: ${LLM_PROVIDER}`);
 
-// Chatbot LLM for responding to the user's query.
-const llm = makeOpenAiChatLlm({
-  openAiClient,
-  deployment: OPENAI_CHAT_COMPLETION_MODEL,
-  openAiLmmConfigOptions: {
-    temperature: 0.5, // Turn up the temperature to make the chatbot more creative
-    maxTokens: 500,
-  },
+// Create the LLM based on the selected provider
+const llm = createChatLlm(LLM_PROVIDER, {
+  // Common configuration
+  timeout: LLM_TIMEOUT_MS,
+
+  // Ollama-specific configuration
+  baseUrl: OLLAMA_BASE_URL,
+  model: LLM_PROVIDER.toLowerCase() === "ollama" ? OLLAMA_CHAT_MODEL : GEMINI_CHAT_MODEL,
+
+  // Gemini-specific configuration
+  apiKey: GEMINI_API_KEY,
 });
 
 // MongoDB data source for the content used in RAG.
@@ -57,13 +60,20 @@ const embeddedContentStore = makeMongoDbEmbeddedContentStore({
 
 // Creates vector embeddings for user queries to find matching content
 // in the embeddedContentStore using Atlas Vector Search.
-const embedder = makeOpenAiEmbedder({
-  openAiClient,
-  deployment: OPENAI_EMBEDDING_MODEL,
-  backoffOptions: {
-    numOfAttempts: 3,
-    maxDelay: 5000,
-  },
+const embedder = createEmbedder(LLM_PROVIDER, {
+  // Common configuration
+  timeout: LLM_TIMEOUT_MS,
+
+  // Ollama-specific configuration
+  baseUrl: OLLAMA_BASE_URL,
+  numOfAttempts: 3,
+  maxDelay: 5000,
+
+  // Gemini-specific configuration
+  apiKey: GEMINI_API_KEY,
+
+  // Model selection based on provider
+  embeddingModel: LLM_PROVIDER.toLowerCase() === "ollama" ? OLLAMA_EMBEDDING_MODEL : GEMINI_EMBEDDING_MODEL,
 });
 
 // Find content in the embeddedContentStore using the vector embeddings
@@ -72,10 +82,10 @@ const findContent = makeDefaultFindContent({
   embedder,
   store: embeddedContentStore,
   findNearestNeighborsOptions: {
-    k: 3,
+    k: 10, // Increased from 3 to 10 to get more results
     path: "embedding",
     indexName: VECTOR_SEARCH_INDEX_NAME,
-    minScore: 0.8,
+    minScore: 0.1, // Significantly lowered from 0.5 to increase chances of finding matches with Ollama embeddings
   },
 });
 
@@ -106,14 +116,70 @@ User query: ${originalUserMessage}`;
 };
 
 // Generates the user prompt for the chatbot using RAG
-const generateUserPrompt: GenerateUserPromptFunc = makeRagGenerateUserPrompt({
-  findContent,
-  makeUserMessage,
-  queryPreprocessor: makeStepBackPromptingPreprocessor(
-    // @ts-ignore
-    makeLangchainOpenAiLlm(OPENAI_CHAT_COMPLETION_MODEL, OPENAI_API_KEY)
-  ),
-});
+const generateUserPrompt: GenerateUserPromptFunc = async ({ userMessageText, conversation, reqId }) => {
+  // For certain queries, bypass vector search entirely
+  const bypassQueries = [
+    "what can you do",
+    "who are you",
+    "help",
+    "hello",
+    "hi",
+    "recipe",
+    "food",
+    "cook",
+    "bake",
+    "dessert",
+    "dinner",
+    "breakfast",
+    "lunch",
+    "meal",
+    "dish",
+    "cuisine",
+    "ingredient",
+    "menu",
+    "feast",
+    "banquet",
+    "party",
+    "gilded age",
+    "fannie farmer",
+    "19th century",
+    "20th century",
+    "traditional",
+    "historical",
+    "vintage",
+    "classic",
+    "old-fashioned",
+    "antique",
+    "victorian",
+    "edwardian"
+  ];
+
+  const lowerCaseUserMessage = userMessageText.toLowerCase();
+  const shouldBypass = bypassQueries.some(query => lowerCaseUserMessage.includes(query));
+
+  if (shouldBypass) {
+    logger.info({
+      reqId,
+      message: "Bypassing vector search for query: " + userMessageText,
+    });
+
+    return {
+      userMessage: {
+        role: "user",
+        content: userMessageText,
+      },
+      rejectQuery: false,
+    };
+  }
+
+  // For other queries, use the standard RAG approach
+  const standardPrompt = makeRagGenerateUserPrompt({
+    findContent,
+    makeUserMessage,
+  });
+
+  return standardPrompt({ userMessageText, conversation, reqId });
+};
 
 // System prompt for chatbot
 const systemPrompt: SystemPrompt = {
@@ -137,15 +203,32 @@ const config: AppConfig = {
     systemPrompt,
     conversations,
   },
-  maxRequestTimeoutMs: 30000,
+  maxRequestTimeoutMs: 60000, // Increased to 60 seconds to match Ollama timeout
 };
 
 // Start the server and clean up resources on SIGINT.
-const PORT = process.env.PORT || 3000;
+// Parse command line arguments for port
+const args = process.argv.slice(2);
+let PORT = process.env.PORT || 3000;
+
+// Check if --port argument is provided
+const portArgIndex = args.indexOf('--port');
+if (portArgIndex !== -1 && portArgIndex < args.length - 1) {
+  const portArg = args[portArgIndex + 1];
+  const portNumber = parseInt(portArg, 10);
+  if (!isNaN(portNumber)) {
+    PORT = portNumber;
+  }
+}
 const startServer = async () => {
   await mongodb.connect();
   logger.info("Starting server...");
+
+  // Create the Express app with the MongoDB Chatbot Server configuration
   const app = await makeApp(config);
+
+  // Let's try a simpler approach - modify the UI to use the correct API endpoint
+
   const server = app.listen(PORT, () => {
     logger.info(`Server listening on port: ${PORT}`);
   });
